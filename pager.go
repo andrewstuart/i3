@@ -1,5 +1,7 @@
 package i3
 
+import "fmt"
+
 type Pager struct {
 	Bars []Barrer
 
@@ -7,7 +9,12 @@ type Pager struct {
 }
 
 func (p *Pager) Bar() []Block {
-	return p.Bars[p.i%uint(len(p.Bars))].Bar()
+	n := p.i % uint(len(p.Bars))
+	bar := p.Bars[n].Bar()
+	bar = append(bar, Block{
+		FullText: fmt.Sprintf("Page %02d", n+1),
+	})
+	return bar
 }
 
 func (p *Pager) Handle(c Click) bool {
