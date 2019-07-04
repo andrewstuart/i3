@@ -1,4 +1,8 @@
-# Redesign
+# i3
+
+A simple i3 status bar application
+
+# Impending Redesign
 
 ## Goals
 - Make it simple to start. A string should be easy and free.
