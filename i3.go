@@ -4,17 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"image/color"
 	"io"
+	"strconv"
 	"time"
 
+	"github.com/lucasb-eyer/go-colorful"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 )
 
+// Bool is a sad helper function
+func Bool(v bool) *bool {
+	return &v
+}
+
+// A Block represents an individual "block" (per https://i3wm.org/docs/i3bar-protocol.html)
 type Block struct {
-	FullText  string      `json:"full_text,omitempty"`
-	ShortText string      `json:"short_text,omitempty"`
-	Color     color.Color `json:"color,omitempty"`
+	Name                string `json:"name"`
+	Instance            string `json:"instance"`
+	FullText            string `json:"full_text,omitempty"`
+	ShortText           string `json:"short_text,omitempty"`
+	Color               *Color `json:"color,omitempty"`
+	Handler             `json:"-"`
+	Background          *Color `json:"background,omitempty"`
+	Border              *Color `json:"border,omitempty"`
+	MinWidth            int    `json:"min_width,omitempty"`
+	Align               string `json:"align,omitempty"`
+	Urgent              *bool  `json:"urgent,omitempty"`
+	Separator           *bool  `json:"separator,omitempty"`
+	SeparatorBlockWidth int    `json:"separator_block_width,omitempty"`
+	Markup              string `json:"markup,omitempty"`
 }
 
 type Barrer interface {
@@ -25,12 +44,20 @@ type Blocker interface {
 	Block() Block
 }
 
-type Status []interface{}
+type BlockerFunc func() Block
 
-func (s Status) Bar() []Block {
+func (b BlockerFunc) Block() Block {
+	return b()
+}
+
+type Static []interface{}
+
+func (s Static) Bar() []Block {
 	var objs []Block
-	for _, obj := range s {
+	for i, obj := range s {
 		switch o := obj.(type) {
+		case *Block:
+			objs = append(objs, *o)
 		case Block:
 			objs = append(objs, o)
 		case Blocker:
@@ -40,6 +67,12 @@ func (s Status) Bar() []Block {
 		case fmt.Stringer:
 			objs = append(objs, Block{FullText: o.String()})
 		}
+		if objs[i].Name == "" {
+			objs[i].Name = fmt.Sprint(len(objs) - 1)
+		}
+		if objs[i].Instance == "" {
+			objs[i].Instance = fmt.Sprint(len(objs) - 1)
+		}
 	}
 	return objs
 }
@@ -47,36 +80,77 @@ func (s Status) Bar() []Block {
 type Runner struct {
 	Frequency time.Duration
 	Barrer    Barrer
+
+	updates chan struct{}
 }
 
-// type out struct {
-// 	Block
-// 	Name     string
-// 	Instance string
-// }
+type Click struct {
+	Name         string
+	Instance     string
+	X, Y, Button int
+}
 
-func (r Runner) Run(ctx context.Context, in io.Reader, out io.Writer) error {
-	_, err := out.Write([]byte(`{"version": 1}
+func (r *Runner) Run(ctx context.Context, in io.Reader, out io.Writer) error {
+	_, err := out.Write([]byte(`{"version": 1, "click_events": true}
 [
 `))
 	if err != nil {
 		return errors.Wrap(err, "error writing header")
 	}
 
-	tk := time.NewTicker(r.Frequency)
-	enc := json.NewEncoder(out)
+	var eg errgroup.Group
 
-	for {
-		select {
-		// case e := <-clicks:
-		case <-tk.C:
-			err = enc.Encode(r.Barrer.Bar())
+	clicks := make(chan Click)
+	eg.Go(func() error {
+		dec := json.NewDecoder(in)
+		dec.Token()
+		var click Click
+		for {
+			err := dec.Decode(&click)
+			if err != nil {
+				return errors.Wrap(err, "could not decode clicks")
+			}
+			clicks <- click
+		}
+	})
+
+	enc := json.NewEncoder(out)
+	eg.Go(func() error {
+		for {
+			bar := r.Barrer.Bar()
+			err = enc.Encode(bar)
 			if err != nil {
 				return errors.Wrap(err, "could not encode bar")
 			}
 			out.Write([]byte{','})
-		case <-ctx.Done():
-			return nil
+			select {
+			case c := <-clicks:
+				if h, ok := r.Barrer.(Handler); ok && h.Handle(c) {
+					continue
+				}
+				if n, err := strconv.Atoi(c.Instance); err == nil && bar[n].Handler != nil {
+					go bar[n].Handler.Handle(c)
+				}
+			case <-time.After(r.Frequency):
+			case <-ctx.Done():
+				return nil
+			}
 		}
-	}
+	})
+
+	return eg.Wait()
+}
+
+type SFunc func() string
+
+func (s SFunc) String() string {
+	return s()
+}
+
+type Color struct {
+	colorful.Color
+}
+
+func (c *Color) MarshalJSON() ([]byte, error) {
+	return []byte("\"" + c.Hex() + "\""), nil
 }
